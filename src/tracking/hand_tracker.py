@@ -1,96 +1,92 @@
 import cv2
 import mediapipe as mp
 import numpy as np
+import time
 from typing import Tuple, Optional
+
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
 
 
 class HandTracker:
     """
-    Real-time hand tracking and index fingertip extraction using MediaPipe.
-    Optimized for stability and air-writing UX.
+    Lightweight fingertip tracker using MediaPipe Tasks HandLandmarker.
+    Only returns the index fingertip coordinate.
     """
 
     def __init__(
         self,
-        static_image_mode: bool = False,
+        model_asset_path: str = "models/hand_landmarker.task",
+        processing_size: Optional[Tuple[int, int]] = (192, 144),
         max_num_hands: int = 1,
-        min_detection_confidence: float = 0.6,
-        min_tracking_confidence: float = 0.5,
-        model_complexity: int = 1
+        min_hand_detection_confidence: float = 0.7,
+        min_hand_presence_confidence: float = 0.6,
+        min_tracking_confidence: float = 0.6
     ):
-        """
-        Initialize MediaPipe Hands with stable real-time configuration.
-        """
 
-        self.mp_hands = mp.solutions.hands
-        self.mp_draw = mp.solutions.drawing_utils
-        self.mp_drawing_styles = mp.solutions.drawing_styles
+        self.processing_size = processing_size
 
-        self.hands = self.mp_hands.Hands(
-            static_image_mode=static_image_mode,
-            max_num_hands=max_num_hands,
-            model_complexity=model_complexity,
-            min_detection_confidence=min_detection_confidence,
-            min_tracking_confidence=min_tracking_confidence
+        base_options = python.BaseOptions(model_asset_path=model_asset_path)
+
+        options = vision.HandLandmarkerOptions(
+            base_options=base_options,
+            num_hands=max_num_hands,
+            min_hand_detection_confidence=min_hand_detection_confidence,
+            min_hand_presence_confidence=min_hand_presence_confidence,
+            min_tracking_confidence=min_tracking_confidence,
+            running_mode=vision.RunningMode.VIDEO
         )
 
+        self.detector = vision.HandLandmarker.create_from_options(options)
+
+        # required for VIDEO mode
+        self.last_timestamp_ms = 0
+
     def process_frame(
-        self,
-        frame: np.ndarray
+        self, frame: np.ndarray
     ) -> Tuple[np.ndarray, Optional[Tuple[float, float]]]:
-        """
-        Process frame to detect hand landmarks and extract index fingertip.
 
-        Returns:
-            processed_frame (np.ndarray)
-            normalized_coordinates (Optional[Tuple[float, float]])
-        """
-
-        # Defensive frame validation
         if frame is None or frame.size == 0:
             return frame, None
 
-        # Mirror frame for natural air-writing UX
-        frame = cv2.flip(frame, 1)
+        # Run detection on a smaller frame for speed when configured.
+        if self.processing_size is not None:
+            if frame.shape[1] != self.processing_size[0] or frame.shape[0] != self.processing_size[1]:
+                small_frame = cv2.resize(frame, self.processing_size)
+            else:
+                small_frame = frame
+        else:
+            small_frame = frame
 
-        # Convert BGR to RGB (MediaPipe requirement)
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        rgb_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
 
-        # Performance optimization: pass by reference
-        rgb_frame.flags.writeable = False
-        results = self.hands.process(rgb_frame)
+        mp_image = mp.Image(
+            image_format=mp.ImageFormat.SRGB,
+            data=rgb_frame
+        )
 
-        normalized_coordinates = None
+        # ensure increasing timestamps
+        timestamp_ms = int(time.monotonic() * 1000)
 
-        if results.multi_hand_landmarks:
-            # Since max_num_hands = 1, directly access first element
-            hand_landmarks = results.multi_hand_landmarks[0]
+        if timestamp_ms <= self.last_timestamp_ms:
+            timestamp_ms = self.last_timestamp_ms + 1
 
-            # Draw landmarks
-            self.mp_draw.draw_landmarks(
-                frame,
-                hand_landmarks,
-                self.mp_hands.HAND_CONNECTIONS,
-                self.mp_drawing_styles.get_default_hand_landmarks_style(),
-                self.mp_drawing_styles.get_default_hand_connections_style()
-            )
+        self.last_timestamp_ms = timestamp_ms
 
-            # Extract index fingertip safely using enum
-            index_tip = hand_landmarks.landmark[
-                self.mp_hands.HandLandmark.INDEX_FINGER_TIP
-            ]
+        results = self.detector.detect_for_video(mp_image, timestamp_ms)
 
-            normalized_coordinates = (index_tip.x, index_tip.y)
+        coords = None
 
-            # Optional: draw fingertip highlight
-            h, w, _ = frame.shape
-            cx, cy = int(index_tip.x * w), int(index_tip.y * h)
-            cv2.circle(frame, (cx, cy), 8, (255, 0, 0), -1)
+        if results.hand_landmarks:
 
-        return frame, normalized_coordinates
+            hand_landmarks = results.hand_landmarks[0]
 
-    def release(self) -> None:
-        """
-        Release MediaPipe resources explicitly.
-        """
-        self.hands.close()
+            # index fingertip = landmark 8
+            index_tip = hand_landmarks[8]
+
+            coords = (index_tip.x, index_tip.y)
+
+        return frame, coords
+
+    def release(self):
+        self.detector.close()
