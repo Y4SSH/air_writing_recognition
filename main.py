@@ -5,6 +5,7 @@ from queue import Empty, Full, Queue
 import logging
 
 from src.camera_capture import select_best_capture
+from src.trajectory.trajectory_tracker import TrajectoryTracker
 from src.tracking.hand_tracker import HandTracker
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -12,10 +13,10 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 def main():
 
-    # Ultra-fast preset: prioritize smooth UI FPS over landmark update rate.
+    # Balanced preset: improved accuracy with smooth rendering.
     capture_size = (320, 240)
-    tracker = HandTracker(processing_size=(128, 96))
-    target_inference_fps = 8.0
+    tracker = HandTracker(processing_size=(192, 144))
+    target_inference_fps = 12.0
     inference_interval = 1.0 / target_inference_fps
 
     cap, backend_name, measured_fps = select_best_capture(
@@ -39,6 +40,10 @@ def main():
     # smoothing
     smooth_coords = None
     alpha = 0.85
+
+    trajectory = TrajectoryTracker()
+    dataset = []
+    tracking_paused = False
 
     def inference_loop():
         while running["flag"]:
@@ -80,7 +85,7 @@ def main():
         coords = latest_coords["value"]
 
         # smoothing
-        if coords is not None:
+        if coords is not None and not tracking_paused:
 
             if smooth_coords is None:
                 smooth_coords = coords
@@ -92,6 +97,22 @@ def main():
                     alpha * cx + (1 - alpha) * sx,
                     alpha * cy + (1 - alpha) * sy
                 )
+        elif tracking_paused:
+            smooth_coords = None
+        else:
+            smooth_coords = None
+
+        if tracking_paused:
+            trajectory.update(None)
+        else:
+            trajectory.update(smooth_coords)
+
+        if trajectory.stroke_finished():
+            if trajectory.is_valid_stroke():
+                stroke = trajectory.get_points()
+                dataset.append(stroke)
+                print(f"Stroke saved | Total: {len(dataset)} | Points: {len(stroke)}")
+            trajectory.reset()
 
         # draw fingertip
         if smooth_coords is not None:
@@ -101,6 +122,16 @@ def main():
 
             cv2.circle(frame, (px, py), 10, (255, 0, 0), -1)
 
+        path_points = trajectory.get_points()
+        if len(path_points) > 1:
+            h, w, _ = frame.shape
+            for i in range(1, len(path_points)):
+                x1 = int(path_points[i - 1][0] * w)
+                y1 = int(path_points[i - 1][1] * h)
+                x2 = int(path_points[i][0] * w)
+                y2 = int(path_points[i][1] * h)
+                cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
         # FPS
         curr_time = time.time()
         fps = 1 / (curr_time - prev_time) if curr_time != prev_time else 0
@@ -109,10 +140,30 @@ def main():
         cv2.putText(frame, f"FPS: {int(fps)}", (10, 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
+        cv2.putText(frame, f"Strokes: {len(dataset)}", (10, 75),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+
+        status_text = "PAUSED" if tracking_paused else "TRACKING"
+        status_color = (0, 0, 255) if tracking_paused else (0, 255, 0)
+        cv2.putText(frame, status_text, (10, 110),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
+
         cv2.imshow("Air Writing Tracker", frame)
 
-        if cv2.waitKey(1) & 0xFF == ord("q"):
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("q"):
             break
+        if key == ord("c"):
+            trajectory.reset()
+        if key == ord("s"):
+            if trajectory.is_valid_stroke():
+                stroke = trajectory.get_points()
+                dataset.append(stroke)
+                print(f"Stroke saved | Total: {len(dataset)} | Points: {len(stroke)}")
+            trajectory.reset()
+            tracking_paused = False
+        if key == 32:  # spacebar
+            tracking_paused = not tracking_paused
 
     # cleanup
     running["flag"] = False

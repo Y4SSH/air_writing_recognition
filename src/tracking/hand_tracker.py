@@ -19,9 +19,9 @@ class HandTracker:
         model_asset_path: str = "models/hand_landmarker.task",
         processing_size: Optional[Tuple[int, int]] = (192, 144),
         max_num_hands: int = 1,
-        min_hand_detection_confidence: float = 0.7,
-        min_hand_presence_confidence: float = 0.6,
-        min_tracking_confidence: float = 0.6
+        min_hand_detection_confidence: float = 0.75,
+        min_hand_presence_confidence: float = 0.7,
+        min_tracking_confidence: float = 0.7
     ):
 
         self.processing_size = processing_size
